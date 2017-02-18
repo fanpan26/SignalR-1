@@ -2,7 +2,6 @@
 // Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
 
 using System;
-using System.IO.Pipelines;
 using System.Net.Http;
 using System.Threading;
 using System.Threading.Tasks;
@@ -18,12 +17,12 @@ namespace Microsoft.AspNetCore.Sockets.Client
         private readonly ILoggerFactory _loggerFactory;
         private readonly ILogger _logger;
         private int _connectionState = ConnectionState.Initial;
-        private IChannelConnection<Message> _transportChannel;
+        private IChannelConnection<Message, SendMessage> _transportChannel;
         private ITransport _transport;
         private Task _receiveLoopTask;
 
         private ReadableChannel<Message> Input => _transportChannel.Input;
-        private WritableChannel<Message> Output => _transportChannel.Output;
+        private WritableChannel<SendMessage> Output => _transportChannel.Output;
 
         public Uri Url { get; }
 
@@ -120,11 +119,11 @@ namespace Microsoft.AspNetCore.Sockets.Client
 
         private async Task StartTransport(Uri connectUrl)
         {
-            var applicationToTransport = Channel.CreateUnbounded<Message>();
+            var applicationToTransport = Channel.CreateUnbounded<SendMessage>();
             var transportToApplication = Channel.CreateUnbounded<Message>();
-            var applicationSide = new ChannelConnection<Message>(transportToApplication, applicationToTransport);
+            var applicationSide = new ChannelConnection<SendMessage, Message>(applicationToTransport, transportToApplication);
 
-            _transportChannel = new ChannelConnection<Message>(applicationToTransport, transportToApplication);
+            _transportChannel = new ChannelConnection<Message, SendMessage>(transportToApplication, applicationToTransport);
 
             var ignore = Input.Completion.ContinueWith(t =>
             {
@@ -180,12 +179,12 @@ namespace Microsoft.AspNetCore.Sockets.Client
             _logger.LogTrace("Ending receive loop");
         }
 
-        public Task<bool> SendAsync(byte[] data, MessageType type)
+        public Task SendAsync(byte[] data, MessageType type)
         {
             return SendAsync(data, type, CancellationToken.None);
         }
 
-        public async Task<bool> SendAsync(byte[] data, MessageType type, CancellationToken cancellationToken)
+        public async Task SendAsync(byte[] data, MessageType type, CancellationToken cancellationToken)
         {
             if (data == null)
             {
@@ -194,20 +193,21 @@ namespace Microsoft.AspNetCore.Sockets.Client
 
             if (_connectionState != ConnectionState.Connected)
             {
-                return false;
+                throw new InvalidOperationException(
+                    $"Cannot send messages when the connection is not in the Connected state.");
             }
 
-            var message = new Message(data, type);
+            var sendTcs = new TaskCompletionSource<object>();
+            var message = new SendMessage(data, type, sendTcs);
 
             while (await Output.WaitToWriteAsync(cancellationToken))
             {
                 if (Output.TryWrite(message))
                 {
-                    return true;
+                    await sendTcs.Task;
+                    break;
                 }
             }
-
-            return false;
         }
 
         public async Task DisposeAsync()
