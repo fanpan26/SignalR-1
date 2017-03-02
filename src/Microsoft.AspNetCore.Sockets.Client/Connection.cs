@@ -2,7 +2,6 @@
 // Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
 
 using System;
-using System.IO.Pipelines;
 using System.Net.Http;
 using System.Threading;
 using System.Threading.Tasks;
@@ -21,6 +20,7 @@ namespace Microsoft.AspNetCore.Sockets.Client
         private IChannelConnection<Message> _transportChannel;
         private ITransport _transport;
         private Task _receiveLoopTask;
+        private Task _startTask = Task.FromResult<object>(null);
 
         private ReadableChannel<Message> Input => _transportChannel.Input;
         private WritableChannel<Message> Output => _transportChannel.Output;
@@ -47,20 +47,32 @@ namespace Microsoft.AspNetCore.Sockets.Client
         public Task StartAsync(HttpClient httpClient) => StartAsync(transport: null, httpClient: httpClient);
         public Task StartAsync(ITransport transport) => StartAsync(transport: transport, httpClient: null);
 
-        // TODO HIGH: Fix a race when the connection is being stopped/disposed when start has not finished running
-        public async Task StartAsync(ITransport transport, HttpClient httpClient)
+        public Task StartAsync(ITransport transport, HttpClient httpClient)
         {
-            _transport = transport ?? new WebSocketsTransport(_loggerFactory);
+            _startTask = StartAsyncInternal(transport, httpClient);
+            return _startTask;
+        }
 
+        private async Task StartAsyncInternal(ITransport transport, HttpClient httpClient)
+        {
             if (Interlocked.CompareExchange(ref _connectionState, ConnectionState.Connecting, ConnectionState.Initial)
                 != ConnectionState.Initial)
             {
                 throw new InvalidOperationException("Cannot start a connection that is not in the Initial state.");
             }
 
+            _transport = transport ?? new WebSocketsTransport(_loggerFactory);
+
             try
             {
                 var connectUrl = await GetConnectUrl(Url, httpClient, _logger);
+
+                // Connection is being stopped while start was in progress
+                if (_connectionState == ConnectionState.Disconnected)
+                {
+                    return;
+                }
+
                 await StartTransport(connectUrl);
             }
             catch
@@ -213,6 +225,16 @@ namespace Microsoft.AspNetCore.Sockets.Client
         public async Task DisposeAsync()
         {
             Interlocked.Exchange(ref _connectionState, ConnectionState.Disconnected);
+
+            try
+            {
+                await _startTask;
+            }
+            catch
+            {
+                // We only await the start task to make sure that StartAsync completed. The
+                // _startTask is returned to the user and they should handle exceptions.
+            }
 
             if (_transportChannel != null)
             {

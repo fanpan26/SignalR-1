@@ -106,6 +106,37 @@ namespace Microsoft.AspNetCore.Sockets.Client.Tests
         }
 
         [Fact]
+        public async Task CanStopStartingConnection()
+        {
+            var releaseNegotiateTcs = new TaskCompletionSource<object>();
+            var allowDisposeTcs = new TaskCompletionSource<object>();
+
+            var mockHttpHandler = new Mock<HttpMessageHandler>();
+            mockHttpHandler.Protected()
+                .Setup<Task<HttpResponseMessage>>("SendAsync", ItExpr.IsAny<HttpRequestMessage>(), ItExpr.IsAny<CancellationToken>())
+                .Returns<HttpRequestMessage, CancellationToken>(async (request, cancellationToken) =>
+                {
+                    await Task.Yield();
+                    allowDisposeTcs.SetResult(null);
+                    await releaseNegotiateTcs.Task;
+                    return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(string.Empty) };
+                });
+
+            using (var httpClient = new HttpClient(mockHttpHandler.Object))
+            {
+                var transport = new Mock<ITransport>();
+                var connection = new Connection(new Uri("http://fakeuri.org/"));
+
+                var startTask = connection.StartAsync(transport.Object, httpClient);
+                await allowDisposeTcs.Task;
+                var disposeTask = connection.DisposeAsync();
+                releaseNegotiateTcs.SetResult(null);
+
+                await Task.WhenAll(startTask, disposeTask).OrTimeout();
+            }
+        }
+
+        [Fact]
         public async Task SendReturnsFalseIfConnectionIsNotStarted()
         {
             var connection = new Connection(new Uri("http://fakeuri.org/"));
@@ -165,7 +196,6 @@ namespace Microsoft.AspNetCore.Sockets.Client.Tests
                 {
                     await connection.DisposeAsync();
                 }
-
             }
         }
 
