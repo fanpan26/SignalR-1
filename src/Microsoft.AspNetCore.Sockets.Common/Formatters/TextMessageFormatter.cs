@@ -72,10 +72,10 @@ namespace Microsoft.AspNetCore.Sockets.Formatters
             }
         }
 
-        internal static bool TryParseMessage(ReadOnlySpan<byte> buffer, out Message message, out int bytesConsumed)
+        internal static bool TryParseMessage(ReadOnlyBytes buffer, out Message message, out int bytesConsumed)
         {
             // Read until the first ':' to find the length
-            var consumedSoFar = 0;
+            var consumedForHeader = 0;
             var colonIndex = buffer.IndexOf((byte)FieldDelimiter);
             if (colonIndex < 0)
             {
@@ -83,29 +83,35 @@ namespace Microsoft.AspNetCore.Sockets.Formatters
                 bytesConsumed = 0;
                 return false;
             }
-            consumedSoFar += colonIndex;
-            var lengthSpan = buffer.Slice(0, colonIndex);
+            consumedForHeader += colonIndex;
+            var lengthRange = buffer.Slice(0, colonIndex);
             buffer = buffer.Slice(colonIndex);
 
             // Parse the length
-            if (!PrimitiveParser.TryParseInt32(lengthSpan, out var length, out var consumedByLength, encoder: TextEncoder.Utf8) || consumedByLength < lengthSpan.Length)
+            if (!PrimitiveParser.TryParseInt32(lengthRange.ToSingleSpan(), out var length, out var consumedByLength, encoder: TextEncoder.Utf8) || consumedByLength < lengthRange.Length)
             {
                 message = default(Message);
                 bytesConsumed = 0;
                 return false;
             }
+
+            consumedForHeader += consumedByLength;
 
             // Check if there's enough space in the buffer to even bother continuing
             // There are at least 4 characters we still expect to see: ':', type flag, ':', ';', plus the (encoded) payload length.
-            if (buffer.Length < 4 + length)
+            if (buffer.Length < length + 4)
             {
                 message = default(Message);
                 bytesConsumed = 0;
                 return false;
             }
 
+            // Load the rest of the header into a single span, it's worth the (possible) copy and it's a fixed size
+            var headerBuffer = buffer.Slice(0, 4).ToSingleSpan();
+            buffer = buffer.Slice(4);
+
             // Verify that we have the ':' after the type flag.
-            if (buffer[0] != FieldDelimiter)
+            if (headerBuffer[0] != FieldDelimiter)
             {
                 message = default(Message);
                 bytesConsumed = 0;
@@ -113,31 +119,28 @@ namespace Microsoft.AspNetCore.Sockets.Formatters
             }
 
             // We already know that index 0 is the ':', so next is the type flag at index '1'.
-            if (!TryParseType(buffer[1], out var messageType))
+            if (!TryParseType(headerBuffer[1], out var messageType))
             {
                 message = default(Message);
                 bytesConsumed = 0;
             }
 
             // Verify that we have the ':' after the type flag.
-            if (buffer[2] != FieldDelimiter)
+            if (headerBuffer[2] != FieldDelimiter)
             {
                 message = default(Message);
                 bytesConsumed = 0;
                 return false;
             }
 
-            // Slice off ':[Type]:' and check the remaining length
-            buffer = buffer.Slice(3);
-            consumedSoFar += 3;
+            consumedForHeader += 4;
 
-            // Grab the payload buffer
-            var payload = buffer.Slice(0, length);
+            // Load the payload into an array, since it either needs to be stuffed into
+            // Message, or decoded, and either option requires we load the whole thing up
+            var payload = new byte[length];
+            buffer.Slice(0, length).CopyTo(payload);
             buffer = buffer.Slice(length);
-            consumedSoFar += length;
 
-            // Parse the payload. For now, we make it an array and use the old-fashioned types.
-            // I've filed https://github.com/aspnet/SignalR/issues/192 to update this. -anurse
             if (messageType == MessageType.Binary && payload.Length > 0)
             {
                 // Determine the output size
@@ -166,15 +169,15 @@ namespace Microsoft.AspNetCore.Sockets.Formatters
             }
 
             // Verify the trailer
-            if (buffer.Length < 1 || buffer[0] != MessageDelimiter)
+            if (buffer.Length < 1 || buffer.First.Span[0] != MessageDelimiter)
             {
                 message = default(Message);
                 bytesConsumed = 0;
                 return false;
             }
 
-            message = new Message(payload.ToArray(), messageType);
-            bytesConsumed = consumedSoFar + 1;
+            message = new Message(payload, messageType);
+            bytesConsumed = consumedForHeader + length;
             return true;
         }
 
