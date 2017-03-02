@@ -20,7 +20,7 @@ namespace Microsoft.AspNetCore.Sockets.Client
         private IChannelConnection<Message> _transportChannel;
         private ITransport _transport;
         private Task _receiveLoopTask;
-        private Task _startTask = Task.FromResult<object>(null);
+        private Task _startTask = Task.CompletedTask;
 
         private ReadableChannel<Message> Input => _transportChannel.Input;
         private WritableChannel<Message> Output => _transportChannel.Output;
