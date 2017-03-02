@@ -3,6 +3,7 @@
 
 using System;
 using System.Binary;
+using System.Buffers;
 using System.IO.Pipelines;
 
 namespace Microsoft.AspNetCore.Sockets.Formatters
@@ -14,27 +15,29 @@ namespace Microsoft.AspNetCore.Sockets.Formatters
         private const byte ErrorTypeFlag = 0x02;
         private const byte CloseTypeFlag = 0x03;
 
-        internal static bool TryFormatMessage(Message message, Span<byte> buffer, out int bytesWritten)
+        internal static bool TryWriteMessage(Message message, IOutput output)
         {
-            // We can check the size needed right up front!
-            var sizeNeeded = sizeof(long) + 1 + message.Payload.Length;
-            if (buffer.Length < sizeNeeded)
+            if (!TryGetTypeIndicator(message.Type, out var typeIndicator))
             {
-                bytesWritten = 0;
                 return false;
             }
 
-            buffer.WriteBigEndian((long)message.Payload.Length);
-            if (!TryFormatType(message.Type, buffer.Slice(sizeof(long), 1)))
+            // Try to write the data
+            if (!output.TryWriteBigEndian((long)message.Payload.Length))
             {
-                bytesWritten = 0;
                 return false;
             }
 
-            buffer = buffer.Slice(sizeof(long) + 1);
+            if(!output.TryWriteBigEndian(typeIndicator))
+            {
+                return false;
+            }
 
-            message.Payload.CopyTo(buffer);
-            bytesWritten = sizeNeeded;
+            if(!output.TryWrite(message.Payload))
+            {
+                return false;
+            }
+
             return true;
         }
 
@@ -106,23 +109,24 @@ namespace Microsoft.AspNetCore.Sockets.Formatters
             }
         }
 
-        private static bool TryFormatType(MessageType type, Span<byte> buffer)
+        private static bool TryGetTypeIndicator(MessageType type, out byte typeIndicator)
         {
             switch (type)
             {
                 case MessageType.Text:
-                    buffer[0] = TextTypeFlag;
+                    typeIndicator = TextTypeFlag;
                     return true;
                 case MessageType.Binary:
-                    buffer[0] = BinaryTypeFlag;
+                    typeIndicator = BinaryTypeFlag;
                     return true;
                 case MessageType.Close:
-                    buffer[0] = CloseTypeFlag;
+                    typeIndicator = CloseTypeFlag;
                     return true;
                 case MessageType.Error:
-                    buffer[0] = ErrorTypeFlag;
+                    typeIndicator = ErrorTypeFlag;
                     return true;
                 default:
+                    typeIndicator = 0;
                     return false;
             }
         }

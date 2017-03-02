@@ -3,6 +3,9 @@
 
 using System;
 using System.Binary;
+using System.Buffers;
+using System.Text;
+using System.Text.Formatting;
 
 namespace Microsoft.AspNetCore.Sockets.Formatters
 {
@@ -12,12 +15,12 @@ namespace Microsoft.AspNetCore.Sockets.Formatters
         private static readonly Span<byte> Newline = new byte[] { (byte)'\r', (byte)'\n' };
 
         private const byte LineFeed = (byte)'\n';
-        private const byte TextTypeFlag = (byte)'T';
-        private const byte BinaryTypeFlag = (byte)'B';
-        private const byte CloseTypeFlag = (byte)'C';
-        private const byte ErrorTypeFlag = (byte)'E';
+        private const char TextTypeFlag = 'T';
+        private const char BinaryTypeFlag = 'B';
+        private const char CloseTypeFlag = 'C';
+        private const char ErrorTypeFlag = 'E';
 
-        public static bool TryFormatMessage(Message message, Span<byte> buffer, out int bytesWritten)
+        public static bool TryWriteMessage(Message message, IOutput output)
         {
             if (!message.EndOfMessage)
             {
@@ -27,70 +30,53 @@ namespace Microsoft.AspNetCore.Sockets.Formatters
                 throw new InvalidOperationException("Cannot format message where endOfMessage is false using this format");
             }
 
-            // Need at least: Length of 'data: ', one character type, one \r\n, and the trailing \r\n
-            if (buffer.Length < DataPrefix.Length + 1 + Newline.Length + Newline.Length)
+            if (!TryGetTypeIndicator(message.Type, out var typeIndicator))
             {
-                bytesWritten = 0;
                 return false;
             }
-            DataPrefix.CopyTo(buffer);
-            buffer = buffer.Slice(DataPrefix.Length);
-            if (!TryFormatType(buffer, message.Type))
-            {
-                bytesWritten = 0;
-                return false;
-            }
-            buffer = buffer.Slice(1);
 
-            Newline.CopyTo(buffer);
-            buffer = buffer.Slice(Newline.Length);
+            // Write the Data Prefix
+            if(!output.TryWrite(DataPrefix))
+            {
+                return false;
+            }
+
+            // Write the type indicator
+            output.Append(typeIndicator, TextEncoder.Utf8);
+
+            if(!output.TryWrite(Newline))
+            {
+                return false;
+            }
 
             // Write the payload
-            if (!TryFormatPayload(message.Payload, message.Type, buffer, out var writtenForPayload))
+            if (!TryWritePayload(message.Payload, message.Type, output))
             {
-                bytesWritten = 0;
                 return false;
             }
-            buffer = buffer.Slice(writtenForPayload);
 
-            if (buffer.Length < Newline.Length)
+            if (!output.TryWrite(Newline))
             {
-                bytesWritten = 0;
                 return false;
             }
-            Newline.CopyTo(buffer);
 
-            bytesWritten = DataPrefix.Length + Newline.Length + 1 + writtenForPayload + Newline.Length;
             return true;
         }
 
-        private static bool TryFormatPayload(ReadOnlySpan<byte> payload, MessageType type, Span<byte> buffer, out int bytesWritten)
+        private static bool TryWritePayload(ReadOnlySpan<byte> payload, MessageType type, IOutput output)
         {
             // Short-cut for empty payload
             if (payload.Length == 0)
             {
-                bytesWritten = 0;
                 return true;
             }
 
-            var writtenSoFar = 0;
             if (type == MessageType.Binary)
             {
-                var encodedSize = DataPrefix.Length + Base64.ComputeEncodedLength(payload.Length) + Newline.Length;
-                if (buffer.Length < encodedSize)
-                {
-                    bytesWritten = 0;
-                    return false;
-                }
-                DataPrefix.CopyTo(buffer);
-                buffer = buffer.Slice(DataPrefix.Length);
-
-                var encodedLength = Base64.Encode(payload, buffer);
-                buffer = buffer.Slice(encodedLength);
-
-                Newline.CopyTo(buffer);
-                writtenSoFar += encodedSize;
-                buffer.Slice(Newline.Length);
+                // TODO: Base64 writer that works with IOutput would be amazing!
+                var arr = new byte[Base64.ComputeEncodedLength(payload.Length)];
+                Base64.Encode(payload, arr);
+                return TryWriteLine(arr, output);
             }
             else
             {
@@ -135,73 +121,54 @@ namespace Microsoft.AspNetCore.Sockets.Formatters
                         payload = payload.Slice(nextSliceStart);
                     }
 
-                    if (!TryFormatLine(slice, buffer, out var writtenByLine))
+                    if (!TryWriteLine(slice, output))
                     {
-                        bytesWritten = 0;
                         return false;
                     }
-                    buffer = buffer.Slice(writtenByLine);
-                    writtenSoFar += writtenByLine;
                 }
             }
 
-            bytesWritten = writtenSoFar;
             return true;
         }
 
-        private static bool TryFormatLine(ReadOnlySpan<byte> line, Span<byte> buffer, out int bytesWritten)
+        private static bool TryWriteLine(ReadOnlySpan<byte> line, IOutput output)
         {
-            // We're going to write the whole thing. HOWEVER, if the last byte is a '\r', we want to truncate it
-            // because it was the '\r' in a '\r\n' newline sequence
-            // This won't require an additional byte in the buffer because after this line we have to write a newline sequence anyway.
-            var writtenSoFar = 0;
-            if (buffer.Length < DataPrefix.Length + line.Length)
+            if(!output.TryWrite(DataPrefix))
             {
-                bytesWritten = 0;
                 return false;
             }
-            DataPrefix.CopyTo(buffer);
-            writtenSoFar += DataPrefix.Length;
-            buffer = buffer.Slice(DataPrefix.Length);
 
-            line.CopyTo(buffer);
-            var sliceTo = line.Length;
-            if (sliceTo > 0 && buffer[sliceTo - 1] == '\r')
+            if(!output.TryWrite(line))
             {
-                sliceTo -= 1;
-            }
-            writtenSoFar += sliceTo;
-            buffer = buffer.Slice(sliceTo);
-
-            if (buffer.Length < Newline.Length)
-            {
-                bytesWritten = 0;
                 return false;
             }
-            writtenSoFar += Newline.Length;
-            Newline.CopyTo(buffer);
 
-            bytesWritten = writtenSoFar;
+            if(!output.TryWrite(Newline))
+            {
+                return false;
+            }
+
             return true;
         }
 
-        private static bool TryFormatType(Span<byte> buffer, MessageType type)
+        private static bool TryGetTypeIndicator(MessageType type, out char typeIndicator)
         {
             switch (type)
             {
                 case MessageType.Text:
-                    buffer[0] = TextTypeFlag;
+                    typeIndicator = TextTypeFlag;
                     return true;
                 case MessageType.Binary:
-                    buffer[0] = BinaryTypeFlag;
+                    typeIndicator = BinaryTypeFlag;
                     return true;
                 case MessageType.Close:
-                    buffer[0] = CloseTypeFlag;
+                    typeIndicator = CloseTypeFlag;
                     return true;
                 case MessageType.Error:
-                    buffer[0] = ErrorTypeFlag;
+                    typeIndicator = ErrorTypeFlag;
                     return true;
                 default:
+                    typeIndicator = '\0';
                     return false;
             }
         }

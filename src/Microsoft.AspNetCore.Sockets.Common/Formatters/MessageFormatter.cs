@@ -2,12 +2,13 @@
 // Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
 
 using System;
+using System.Buffers;
 
 namespace Microsoft.AspNetCore.Sockets.Formatters
 {
     public static class MessageFormatter
     {
-        public static bool TryFormatMessage(Message message, Span<byte> buffer, MessageFormat format, out int bytesWritten)
+        public static bool TryFormatMessage(Message message, IOutput output, MessageFormat format)
         {
             if (!message.EndOfMessage)
             {
@@ -18,8 +19,8 @@ namespace Microsoft.AspNetCore.Sockets.Formatters
             }
 
             return format == MessageFormat.Text ?
-                TextMessageFormatter.TryFormatMessage(message, buffer, out bytesWritten) :
-                BinaryMessageFormatter.TryFormatMessage(message, buffer, out bytesWritten);
+                TextMessageFormatter.TryWriteMessage(message, output) :
+                BinaryMessageFormatter.TryWriteMessage(message, output);
         }
 
         public static bool TryParseMessage(ReadOnlySpan<byte> buffer, MessageFormat format, out Message message, out int bytesConsumed)

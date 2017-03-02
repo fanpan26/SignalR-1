@@ -3,97 +3,80 @@
 
 using System;
 using System.Binary;
-using System.IO.Pipelines;
+using System.Buffers;
 using System.Text;
+using System.Text.Formatting;
 
 namespace Microsoft.AspNetCore.Sockets.Formatters
 {
     internal static class TextMessageFormatter
     {
-        private const byte FieldDelimiter = (byte)':';
-        private const byte MessageDelimiter = (byte)';';
-        private const byte TextTypeFlag = (byte)'T';
-        private const byte BinaryTypeFlag = (byte)'B';
-        private const byte CloseTypeFlag = (byte)'C';
-        private const byte ErrorTypeFlag = (byte)'E';
+        private const char FieldDelimiter = ':';
+        private const char MessageDelimiter = ';';
+        private const char TextTypeFlag = 'T';
+        private const char BinaryTypeFlag = 'B';
+        private const char CloseTypeFlag = 'C';
+        private const char ErrorTypeFlag = 'E';
 
-        internal static bool TryFormatMessage(Message message, Span<byte> buffer, out int bytesWritten)
+        internal static bool TryWriteMessage(Message message, IOutput output)
         {
             // Calculate the length, it's the number of characters for text messages, but number of base64 characters for binary
             var length = message.Payload.Length;
             if (message.Type == MessageType.Binary)
             {
-                length = (int)(4 * Math.Ceiling(((double)message.Payload.Length / 3)));
+                length = Base64.ComputeEncodedLength(length);
+            }
+
+            // Get the type indicator
+            if (!TryGetTypeIndicator(message.Type, out var typeIndicator))
+            {
+                return false;
             }
 
             // Write the length as a string
-            int written = 0;
-            if (!length.TryFormat(buffer, out int lengthLen, default(TextFormat), TextEncoder.Utf8))
+            output.Append(length, TextEncoder.Utf8);
+
+            // Write the field delimiter ':'
+            output.Append(FieldDelimiter, TextEncoder.Utf8);
+
+            // Write the type
+            output.Append(typeIndicator, TextEncoder.Utf8);
+
+            // Write the field delimiter ':'
+            output.Append(FieldDelimiter, TextEncoder.Utf8);
+
+            // Write the payload
+            if(!TryWritePayload(message, output, length))
             {
-                bytesWritten = 0;
                 return false;
-            }
-            written += lengthLen;
-            buffer = buffer.Slice(lengthLen);
-
-            // We need at least 4 more characters of space (':', type flag, ':', and eventually the terminating ';')
-            // We'll still need to double-check that we have space for the terminator after we write the payload,
-            // but this way we can exit early if the buffer is way too small.
-            if (buffer.Length < 4 + length)
-            {
-                bytesWritten = 0;
-                return false;
-            }
-            buffer[0] = FieldDelimiter;
-            if (!TryFormatType(message.Type, buffer.Slice(1, 1)))
-            {
-                bytesWritten = 0;
-                return false;
-            }
-            buffer[2] = FieldDelimiter;
-            buffer = buffer.Slice(3);
-            written += 3;
-
-            // Payload
-            if (message.Type == MessageType.Binary)
-            {
-                // Encode the payload directly into the buffer
-                var writtenByPayload = Base64.Encode(message.Payload, buffer);
-
-                // Check that we wrote enough. Length was already set (above) to the expected length in base64-encoded bytes
-                if (writtenByPayload < length)
-                {
-                    bytesWritten = 0;
-                    return false;
-                }
-
-                // We did, advance the buffers and continue
-                buffer = buffer.Slice(writtenByPayload);
-                written += writtenByPayload;
-            }
-            else
-            {
-                message.Payload.CopyTo(buffer.Slice(0, message.Payload.Length));
-                written += message.Payload.Length;
-                buffer = buffer.Slice(message.Payload.Length);
             }
 
             // Terminator
-            if (buffer.Length < 1)
-            {
-                bytesWritten = 0;
-                return false;
-            }
-            buffer[0] = MessageDelimiter;
-            bytesWritten = written + 1;
+            output.Append(MessageDelimiter, TextEncoder.Utf8);
             return true;
+        }
+
+        private static bool TryWritePayload(Message message, IOutput output, int length)
+        {
+            // Payload
+            if (message.Type == MessageType.Binary)
+            {
+                // TODO: Base64 writer that works with IOutput would be amazing!
+                var arr = new byte[Base64.ComputeEncodedLength(message.Payload.Length)];
+                Base64.Encode(message.Payload, arr);
+                return output.TryWrite(arr);
+            }
+            else
+            {
+                return output.TryWrite(message.Payload);
+            }
         }
 
         internal static bool TryParseMessage(ReadOnlySpan<byte> buffer, out Message message, out int bytesConsumed)
         {
             // Read until the first ':' to find the length
             var consumedSoFar = 0;
-            var colonIndex = buffer.IndexOf(FieldDelimiter);
+            var colonIndex = buffer.IndexOf((byte)FieldDelimiter);
             if (colonIndex < 0)
             {
                 message = default(Message);
@@ -197,7 +180,7 @@ namespace Microsoft.AspNetCore.Sockets.Formatters
 
         private static bool TryParseType(byte type, out MessageType messageType)
         {
-            switch (type)
+            switch ((char)type)
             {
                 case TextTypeFlag:
                     messageType = MessageType.Text;
@@ -217,23 +200,24 @@ namespace Microsoft.AspNetCore.Sockets.Formatters
             }
         }
 
-        private static bool TryFormatType(MessageType type, Span<byte> buffer)
+        private static bool TryGetTypeIndicator(MessageType type, out char typeIndicator)
         {
             switch (type)
             {
                 case MessageType.Text:
-                    buffer[0] = TextTypeFlag;
+                    typeIndicator = TextTypeFlag;
                     return true;
                 case MessageType.Binary:
-                    buffer[0] = BinaryTypeFlag;
+                    typeIndicator = BinaryTypeFlag;
                     return true;
                 case MessageType.Close:
-                    buffer[0] = CloseTypeFlag;
+                    typeIndicator = CloseTypeFlag;
                     return true;
                 case MessageType.Error:
-                    buffer[0] = ErrorTypeFlag;
+                    typeIndicator = ErrorTypeFlag;
                     return true;
                 default:
+                    typeIndicator = '\0';
                     return false;
             }
         }

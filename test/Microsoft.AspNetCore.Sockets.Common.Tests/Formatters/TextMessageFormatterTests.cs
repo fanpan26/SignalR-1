@@ -5,6 +5,7 @@ using System;
 using System.Collections.Generic;
 using System.Text;
 using Microsoft.AspNetCore.Sockets.Tests;
+using Microsoft.AspNetCore.Sockets.Tests.Formatters;
 using Xunit;
 
 namespace Microsoft.AspNetCore.Sockets.Formatters.Tests
@@ -23,17 +24,13 @@ namespace Microsoft.AspNetCore.Sockets.Formatters.Tests
                 MessageTestUtils.CreateMessage("Server Error", MessageType.Error)
             };
 
-            var array = new byte[256];
-            var buffer = array.Slice();
-            var totalConsumed = 0;
+            var output = new ArrayOutput(chunkSize: 8); // Use small chunks to test Advance/Enlarge and partial payload writing
             foreach (var message in messages)
             {
-                Assert.True(MessageFormatter.TryFormatMessage(message, buffer, MessageFormat.Text, out var consumed));
-                buffer = buffer.Slice(consumed);
-                totalConsumed += consumed;
+                Assert.True(MessageFormatter.TryFormatMessage(message, output, MessageFormat.Text));
             }
 
-            Assert.Equal(expectedEncoding, Encoding.UTF8.GetString(array, 0, totalConsumed));
+            Assert.Equal(expectedEncoding, Encoding.UTF8.GetString(output.ToArray()));
         }
 
         [Theory]
@@ -44,12 +41,11 @@ namespace Microsoft.AspNetCore.Sockets.Formatters.Tests
         public void WriteBinaryMessage(string encoded, byte[] payload)
         {
             var message = MessageTestUtils.CreateMessage(payload);
-            var buffer = new byte[256];
+            var output = new ArrayOutput(chunkSize: 8); // Use small chunks to test Advance/Enlarge and partial payload writing
 
-            Assert.True(MessageFormatter.TryFormatMessage(message, buffer, MessageFormat.Text, out var bytesWritten));
+            Assert.True(MessageFormatter.TryFormatMessage(message, output, MessageFormat.Text));
 
-            var encodedSpan = buffer.Slice(0, bytesWritten);
-            Assert.Equal(encoded, Encoding.UTF8.GetString(encodedSpan.ToArray()));
+            Assert.Equal(encoded, Encoding.UTF8.GetString(output.ToArray()));
         }
 
         [Theory]
@@ -63,20 +59,20 @@ namespace Microsoft.AspNetCore.Sockets.Formatters.Tests
         public void WriteTextMessage(string encoded, MessageType messageType, string payload)
         {
             var message = MessageTestUtils.CreateMessage(payload, messageType);
-            var buffer = new byte[256];
+            var output = new ArrayOutput(chunkSize: 8); // Use small chunks to test Advance/Enlarge and partial payload writing
 
-            Assert.True(MessageFormatter.TryFormatMessage(message, buffer, MessageFormat.Text, out var bytesWritten));
+            Assert.True(MessageFormatter.TryFormatMessage(message, output, MessageFormat.Text));
 
-            var encodedSpan = buffer.Slice(0, bytesWritten);
-            Assert.Equal(encoded, Encoding.UTF8.GetString(encodedSpan.ToArray()));
+            Assert.Equal(encoded, Encoding.UTF8.GetString(output.ToArray()));
         }
 
         [Fact]
         public void WriteInvalidMessages()
         {
             var message = new Message(new byte[0], MessageType.Binary, endOfMessage: false);
+            var output = new ArrayOutput(chunkSize: 8); // Use small chunks to test Advance/Enlarge and partial payload writing
             var ex = Assert.Throws<InvalidOperationException>(() =>
-                MessageFormatter.TryFormatMessage(message, Span<byte>.Empty, MessageFormat.Text, out var written));
+                MessageFormatter.TryFormatMessage(message, output, MessageFormat.Text));
             Assert.Equal("Cannot format message where endOfMessage is false using this format", ex.Message);
         }
 
@@ -155,51 +151,6 @@ namespace Microsoft.AspNetCore.Sockets.Formatters.Tests
             var buffer = Encoding.UTF8.GetBytes(encoded);
             Assert.False(MessageFormatter.TryParseMessage(buffer, MessageFormat.Text, out var message, out var consumed));
             Assert.Equal(0, consumed);
-        }
-
-        [Theory]
-        [InlineData(new byte[] { 0xAB, 0xCD, 0xEF, 0x12 })]
-        [InlineData(new byte[] { 0xAB, 0xCD, 0xEF, 0x12, 0x34 })]
-        [InlineData(new byte[] { 0xAB, 0xCD, 0xEF, 0x12, 0x34, 0x56 })]
-        public void InsufficientWriteBufferSpaceBinary(byte[] payload)
-        {
-            const int ExpectedSize = 13;
-            var message = MessageTestUtils.CreateMessage(payload);
-
-            byte[] buffer;
-            int bufferSize;
-            int written;
-            for (bufferSize = 0; bufferSize < ExpectedSize; bufferSize++)
-            {
-                buffer = new byte[bufferSize];
-                Assert.False(MessageFormatter.TryFormatMessage(message, buffer, MessageFormat.Text, out written));
-                Assert.Equal(0, written);
-            }
-
-            buffer = new byte[bufferSize];
-            Assert.True(MessageFormatter.TryFormatMessage(message, buffer, MessageFormat.Text, out written));
-            Assert.Equal(ExpectedSize, written);
-        }
-
-        [Fact]
-        public void InsufficientWriteBufferSpaceText()
-        {
-            const int ExpectedSize = 9;
-            var message = MessageTestUtils.CreateMessage("Test", MessageType.Text);
-
-            byte[] buffer;
-            int bufferSize;
-            int written;
-            for (bufferSize = 0; bufferSize < ExpectedSize; bufferSize++)
-            {
-                buffer = new byte[bufferSize];
-                Assert.False(MessageFormatter.TryFormatMessage(message, buffer, MessageFormat.Text, out written));
-                Assert.Equal(0, written);
-            }
-
-            buffer = new byte[bufferSize];
-            Assert.True(MessageFormatter.TryFormatMessage(message, buffer, MessageFormat.Text, out written));
-            Assert.Equal(ExpectedSize, written);
         }
     }
 }
