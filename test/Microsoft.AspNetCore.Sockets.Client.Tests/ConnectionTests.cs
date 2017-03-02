@@ -501,5 +501,37 @@ namespace Microsoft.AspNetCore.Sockets.Client.Tests
                 }
             }
         }
+
+        [Fact]
+        public async Task CannotReceiveAfterConnectionIsDisposed()
+        {
+            var mockHttpHandler = new Mock<HttpMessageHandler>();
+            mockHttpHandler.Protected()
+                .Setup<Task<HttpResponseMessage>>("SendAsync", ItExpr.IsAny<HttpRequestMessage>(), ItExpr.IsAny<CancellationToken>())
+                .Returns<HttpRequestMessage, CancellationToken>(async (request, cancellationToken) =>
+                {
+                    await Task.Yield();
+                    if (request.RequestUri.AbsolutePath.EndsWith("/poll"))
+                    {
+                        return new HttpResponseMessage(HttpStatusCode.InternalServerError) { Content = new StringContent(string.Empty) };
+                    }
+                    return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(string.Empty) };
+                });
+
+            using (var httpClient = new HttpClient(mockHttpHandler.Object))
+            {
+                var longPollingTransport = new LongPollingTransport(httpClient, new LoggerFactory());
+                var connection = new Connection(new Uri("http://fakeuri.org/"));
+
+                var closeTcs = new TaskCompletionSource<Exception>();
+                connection.Closed += e => closeTcs.TrySetResult(e);
+
+                await connection.StartAsync(longPollingTransport, httpClient);
+
+                await connection.DisposeAsync();
+
+                Assert.False(await connection.SendAsync(new byte[] { 1, 1, 3, 5, 8 }, MessageType.Binary));
+            }
+        }
     }
 }
