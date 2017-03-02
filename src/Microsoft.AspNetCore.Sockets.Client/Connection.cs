@@ -162,7 +162,7 @@ namespace Microsoft.AspNetCore.Sockets.Client
                     {
                         // Do not "simplify" - events can be removed from a different thread
                         var receivedEventHandler = Received;
-                        if (receivedEventHandler != null)
+                        if (receivedEventHandler != null & _connectionState == ConnectionState.Connected)
                         {
                             receivedEventHandler(message.Payload, message.Type);
                         }
